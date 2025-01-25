@@ -164,10 +164,7 @@ static const struct behavior_driver_api behavior_backlight_driver_api = {
         on_keymap_binding_convert_central_state_dependent_params,
     .binding_pressed = on_keymap_binding_pressed,
     .binding_released = on_keymap_binding_released,
-    .locality = BEHAVIOR_LOCALITY_GLOBAL,
-#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
-    .parameter_metadata = &metadata,
-#endif
+    .locality = BEHAVIOR_LOCALITY_CENTRAL,
 };
 
 BEHAVIOR_DT_INST_DEFINE(0, behavior_backlight_init, NULL, NULL, NULL, POST_KERNEL,

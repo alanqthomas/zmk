@@ -10,6 +10,20 @@
 #include <zmk/sensors.h>
 
 #define ZMK_SPLIT_RUN_BEHAVIOR_DEV_LEN 9
+#define ZMK_SPLIT_DATA_XFER_MAX_LEN 16
+
+enum data_tag {
+    // RGB state
+    DATA_TAG_RGB_STATE,
+    // Backlight state
+    DATA_TAG_BACKLIGHT_STATE,
+    // HID indicators state
+    DATA_TAG_HID_INDICATORS_STATE,
+    // Keymap state
+    DATA_TAG_KEYMAP_STATE,
+    // Start of custom tags
+    DATA_TAG_CUSTOM_START,
+};
 
 struct sensor_event {
     uint8_t sensor_index;
@@ -31,11 +45,10 @@ struct zmk_split_run_behavior_payload {
     char behavior_dev[ZMK_SPLIT_RUN_BEHAVIOR_DEV_LEN];
 } __packed;
 
-struct zmk_split_input_event_payload {
-    uint8_t type;
-    uint16_t code;
-    uint32_t value;
-    uint8_t sync;
+struct zmk_split_data_xfer_data {
+    enum data_tag data_tag;
+    uint8_t data_size;
+    uint8_t data[ZMK_SPLIT_DATA_XFER_MAX_LEN];
 } __packed;
 
 int zmk_split_bt_position_pressed(uint8_t position);

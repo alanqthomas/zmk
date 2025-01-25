@@ -32,6 +32,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/pointing/input_split.h>
 #include <zmk/hid_indicators_types.h>
 #include <zmk/physical_layouts.h>
+#include <zmk/events/split_peripheral_status_changed.h>
 
 static int start_scanning(void);
 
@@ -55,9 +56,7 @@ struct peripheral_slot {
     struct bt_gatt_subscribe_params batt_lvl_subscribe_params;
     struct bt_gatt_read_params batt_lvl_read_params;
 #endif /* IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING) */
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
-    uint16_t update_hid_indicators;
-#endif // IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
+    uint16_t data_xfer_handle;
     uint16_t selected_physical_layout_handle;
     uint8_t position_state[POSITION_STATE_DATA_LEN];
     uint8_t changed_positions[POSITION_STATE_DATA_LEN];
@@ -210,9 +209,7 @@ int release_peripheral_slot(int index) {
     slot->subscribe_params.value_handle = 0;
     slot->run_behavior_handle = 0;
     slot->selected_physical_layout_handle = 0;
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
-    slot->update_hid_indicators = 0;
-#endif // IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
+    slot->data_xfer_handle = 0;
 
     return 0;
 }
@@ -640,12 +637,6 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
             LOG_DBG("Found select physical layout handle");
             slot->selected_physical_layout_handle = bt_gatt_attr_value_handle(attr);
             k_work_submit(&update_peripherals_selected_layouts_work);
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
-        } else if (!bt_uuid_cmp(((struct bt_gatt_chrc *)attr->user_data)->uuid,
-                                BT_UUID_DECLARE_128(ZMK_SPLIT_BT_UPDATE_HID_INDICATORS_UUID))) {
-            LOG_DBG("Found update HID indicators handle");
-            slot->update_hid_indicators = bt_gatt_attr_value_handle(attr);
-#endif // IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
         } else if (!bt_uuid_cmp(((struct bt_gatt_chrc *)attr->user_data)->uuid,
                                 BT_UUID_BAS_BATTERY_LEVEL)) {
@@ -663,6 +654,12 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
             slot->batt_lvl_read_params.single.offset = 0;
             bt_gatt_read(conn, &slot->batt_lvl_read_params);
 #endif /* IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING) */
+        } else if (bt_uuid_cmp(chrc_uuid, BT_UUID_DECLARE_128(ZMK_SPLIT_BT_CHAR_DATA_XFER_UUID)) ==
+                   0) {
+            LOG_DBG("Found data transfer handle");
+            slot->discover_params.uuid = NULL;
+            slot->discover_params.start_handle = attr->handle + 2;
+            slot->data_xfer_handle = bt_gatt_attr_value_handle(attr);
         }
         break;
     }
@@ -712,7 +709,7 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
     }
 
     bool subscribed = slot->run_behavior_handle && slot->subscribe_params.value_handle &&
-                      slot->selected_physical_layout_handle;
+                      slot->selected_physical_layout_handle && slot->data_xfer_handle;
 
 #if ZMK_KEYMAP_HAS_SENSORS
     subscribed = subscribed && slot->sensor_subscribe_params.value_handle;
@@ -966,6 +963,8 @@ static void split_central_connected(struct bt_conn *conn, uint8_t conn_err) {
 
     confirm_peripheral_slot_conn(conn);
     split_central_process_connection(conn);
+    raise_zmk_split_peripheral_status_changed(
+        (struct zmk_split_peripheral_status_changed){.connected = true});
 }
 
 static void split_central_disconnected(struct bt_conn *conn, uint8_t reason) {
@@ -982,6 +981,9 @@ static void split_central_disconnected(struct bt_conn *conn, uint8_t reason) {
     k_msgq_put(&peripheral_batt_lvl_msgq, &ev, K_NO_WAIT);
     k_work_submit(&peripheral_batt_lvl_work);
 #endif // IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
+
+    raise_zmk_split_peripheral_status_changed(
+        (struct zmk_split_peripheral_status_changed){.connected = false});
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
     release_peripheral_input_subs(conn);
@@ -1145,6 +1147,78 @@ int zmk_split_bt_update_hid_indicator(zmk_hid_indicators_t indicators) {
 
 #endif // IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
 
+K_THREAD_STACK_DEFINE(split_central_data_xfer_q_stack,
+                      CONFIG_ZMK_SPLIT_BLE_CENTRAL_DATA_XFER_STACK_SIZE);
+
+struct k_work_q split_central_data_xfer_q;
+
+K_MSGQ_DEFINE(zmk_split_central_data_xfer_msgq, sizeof(struct zmk_split_data_xfer_data),
+              CONFIG_ZMK_SPLIT_BLE_CENTRAL_DATA_XFER_QUEUE_SIZE, 2);
+
+void split_central_data_xfer_callback(struct k_work *work) {
+    struct zmk_split_data_xfer_data payload;
+
+    while (k_msgq_get(&zmk_split_central_data_xfer_msgq, &payload, K_NO_WAIT) == 0) {
+        for (uint8_t i = 0; i < ZMK_SPLIT_BLE_PERIPHERAL_COUNT; i++) {
+            if (peripherals[i].state != PERIPHERAL_SLOT_STATE_CONNECTED) {
+                LOG_ERR("Source not connected");
+                continue;
+            }
+
+            if (!peripherals[i].data_xfer_handle) {
+                LOG_ERR("Handle not discovered");
+                continue;
+            }
+
+            int err = bt_gatt_write_without_response(peripherals[i].conn,
+                                                     peripherals[i].data_xfer_handle, &payload,
+                                                     sizeof(struct zmk_split_data_xfer_data), true);
+
+            if (err) {
+                LOG_ERR("Failed to write the data transfer characteristic (err %d)", err);
+            }
+        }
+    }
+}
+
+K_WORK_DEFINE(split_central_data_xfer_work, split_central_data_xfer_callback);
+
+static int split_bt_data_xfer_payload(struct zmk_split_data_xfer_data payload) {
+    LOG_DBG("");
+
+    int err = k_msgq_put(&zmk_split_central_data_xfer_msgq, &payload, K_MSEC(100));
+    if (err) {
+        switch (err) {
+        case -EAGAIN: {
+            LOG_WRN("Consumer message queue full, popping first message and queueing again");
+            struct zmk_split_data_xfer_data discarded_report;
+            k_msgq_get(&zmk_split_central_data_xfer_msgq, &discarded_report, K_NO_WAIT);
+            return split_bt_data_xfer_payload(payload);
+        }
+        default:
+            LOG_WRN("Failed to queue data to send (%d)", err);
+            return err;
+        }
+    }
+
+    k_work_submit_to_queue(&split_central_data_xfer_q, &split_central_data_xfer_work);
+
+    return 0;
+};
+
+int zmk_split_central_send_data(enum data_tag tag, uint8_t size, uint8_t *data) {
+    if (size > ZMK_SPLIT_DATA_XFER_MAX_LEN) {
+        LOG_ERR("Payload too large. Size: %d", size);
+        return -EFBIG;
+    }
+    struct zmk_split_data_xfer_data payload;
+    payload.data_tag = tag;
+    payload.data_size = size;
+    memcpy(payload.data, data, size);
+    LOG_HEXDUMP_DBG(&payload, sizeof(struct zmk_split_data_xfer_data), "sending :");
+    return split_bt_data_xfer_payload(payload);
+}
+
 static int finish_init() {
     return IS_ENABLED(CONFIG_ZMK_BLE_CLEAR_BONDS_ON_START) ? 0 : start_scanning();
 }
@@ -1164,6 +1238,9 @@ static struct settings_handler ble_central_settings_handler = {
 static int zmk_split_bt_central_init(void) {
     k_work_queue_start(&split_central_split_run_q, split_central_split_run_q_stack,
                        K_THREAD_STACK_SIZEOF(split_central_split_run_q_stack),
+                       CONFIG_ZMK_BLE_THREAD_PRIORITY, NULL);
+    k_work_queue_start(&split_central_data_xfer_q, split_central_data_xfer_q_stack,
+                       K_THREAD_STACK_SIZEOF(split_central_data_xfer_q_stack),
                        CONFIG_ZMK_BLE_THREAD_PRIORITY, NULL);
     bt_conn_cb_register(&conn_callbacks);
 
