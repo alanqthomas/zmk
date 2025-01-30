@@ -15,6 +15,8 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/event_manager.h>
 #include <zmk/events/wpm_state_changed.h>
 #include <zmk/events/keycode_state_changed.h>
+#include <zmk/split/bluetooth/central.h>
+#include <zmk/workqueue.h>
 
 #include <zmk/wpm.h>
 
@@ -46,6 +48,17 @@ int wpm_event_listener(const zmk_event_t *eh) {
     return 0;
 }
 
+static void zmk_wpm_send_state(struct k_work *work) {
+    int wpm_state = zmk_wpm_get_state();
+
+    int err = zmk_split_central_send_data(DATA_TAG_WPM_STATE, sizeof(int), (uint8_t *)&wpm_state);
+    if (err) {
+        LOG_ERR("WPM state send failed (err %d)", err);
+    }
+}
+
+K_WORK_DEFINE(wpm_send_state_work, zmk_wpm_send_state);
+
 void wpm_work_handler(struct k_work *work) {
     wpm_update_counter++;
     wpm_state = (key_pressed_count / CHARS_PER_WORD) /
@@ -55,6 +68,8 @@ void wpm_work_handler(struct k_work *work) {
         LOG_DBG("Raised WPM state changed %d wpm_update_counter %d", wpm_state, wpm_update_counter);
 
         raise_zmk_wpm_state_changed((struct zmk_wpm_state_changed){.state = wpm_state});
+
+        k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &wpm_send_state_work);
 
         last_wpm_state = wpm_state;
     }

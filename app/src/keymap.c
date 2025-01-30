@@ -18,6 +18,11 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/sensors.h>
 #include <zmk/virtual_key_position.h>
 
+#include <zmk/ble.h>
+#if ZMK_BLE_IS_CENTRAL
+#include <zmk/split/bluetooth/central.h>
+#endif
+
 #include <zmk/event_manager.h>
 #include <zmk/events/position_state_changed.h>
 #include <zmk/events/layer_state_changed.h>
@@ -151,7 +156,10 @@ static inline int set_layer_state(zmk_keymap_layer_id_t layer_id, bool state) {
     // Don't send state changes unless there was an actual change
     if (old_state != _zmk_keymap_layer_state) {
         LOG_DBG("layer_changed: layer %d state %d", layer_id, state);
-        raise_layer_state_changed(layer_id, state);
+        ret = raise_layer_state_changed(layer_id, state);
+        if (ret < 0) {
+            LOG_WRN("Failed to raise layer state changed (%d)", ret);
+        }
 #if ZMK_BLE_IS_CENTRAL
         int err = zmk_split_central_send_data(DATA_TAG_KEYMAP_STATE, sizeof(uint32_t),
                                               (uint8_t *)&_zmk_keymap_layer_state);

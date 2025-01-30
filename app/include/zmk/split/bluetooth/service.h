@@ -22,7 +22,7 @@ enum data_tag {
     // Keymap state
     DATA_TAG_KEYMAP_STATE,
     // Start of custom tags
-    DATA_TAG_CUSTOM_START,
+    DATA_TAG_WPM_STATE,
 };
 
 struct sensor_event {
