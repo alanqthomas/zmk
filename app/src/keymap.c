@@ -27,6 +27,8 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/events/position_state_changed.h>
 #include <zmk/events/layer_state_changed.h>
 #include <zmk/events/sensor_event.h>
+#include <zmk/events/split_peripheral_status_changed.h>
+#include <zmk/workqueue.h>
 
 static zmk_keymap_layers_state_t _zmk_keymap_layer_state = 0;
 static zmk_keymap_layer_id_t _zmk_keymap_layer_default = 0;
@@ -140,6 +142,20 @@ uint8_t map_layer_id_to_index(zmk_keymap_layer_id_t layer_id) {
 
 #endif // IS_ENABLED(CONFIG_ZMK_KEYMAP_LAYER_REORDERING)
 
+static void zmk_num_layers_send_state(struct k_work *work) {
+    uint8_t num_layers = ZMK_KEYMAP_LAYERS_LEN;
+
+    LOG_DBG("Sending number of layers: %d", num_layers);
+    // zmk_hid_indicators_t indicators = zmk_hid_indicators_get_current_profile();
+    int err = zmk_split_central_send_data(DATA_TAG_NUM_LAYERS_STATE, sizeof(uint8_t),
+                                          (uint8_t *)&num_layers);
+    if (err) {
+        LOG_ERR("ZMK NUM LAYERS send failed (err %d)", err);
+    }
+}
+
+K_WORK_DEFINE(num_layers_send_state_work, zmk_num_layers_send_state);
+
 static inline int set_layer_state(zmk_keymap_layer_id_t layer_id, bool state) {
     int ret = 0;
     if (layer_id >= ZMK_KEYMAP_LAYERS_LEN) {
@@ -165,6 +181,48 @@ static inline int set_layer_state(zmk_keymap_layer_id_t layer_id, bool state) {
                                               (uint8_t *)&_zmk_keymap_layer_state);
         if (err) {
             LOG_ERR("Keymap send failed (err %d)", err);
+        }
+
+        uint8_t num_layers = ZMK_KEYMAP_LAYERS_LEN;
+
+        LOG_DBG("Sending number of layers: %d", num_layers);
+        // zmk_hid_indicators_t indicators = zmk_hid_indicators_get_current_profile();
+        int err2 = zmk_split_central_send_data(DATA_TAG_NUM_LAYERS_STATE, sizeof(uint8_t),
+                                               (uint8_t *)&num_layers);
+        if (err2) {
+            LOG_ERR("ZMK NUM LAYERS send failed (err %d)", err);
+        }
+
+        uint8_t data_out[16];
+        // char clear_data[16] = {
+        //     '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0',
+        //     '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0',
+        // };
+        for (int i = 0; i < num_layers; i++) {
+            // strlcpy((char *)&data_out, clear_data, sizeof(clear_data));
+            uint8_t layer_id = i;
+            data_out[0] = layer_id;
+
+            LOG_DBG("LAYER NAME=%s; SIZE=%d", zmk_keymap_layer_names[i],
+                    strlen(zmk_keymap_layer_names[i]));
+
+            int len = strlen(zmk_keymap_layer_names[i]);
+
+            // use strlcpy to write zmk_keymap_layer_names[i] to data_out offset by 1 byte
+            strlcpy((char *)&data_out[1], zmk_keymap_layer_names[i], len + 1);
+
+            LOG_DBG("Sending DATA OUT: %s", data_out);
+
+            // strlcpy((char *)&data_out[1], zmk_keymap_layer_names[i],
+            //         sizeof(zmk_keymap_layer_names[i]));
+
+            // LOG_DBG("Sending layer name: %d %s", layer_id, zmk_keymap_layer_names[i]);
+            // LOG_DBG("Sending DATA OUT: %s", data_out);
+            int err3 = zmk_split_central_send_data(DATA_TAG_LAYER_NAME_STATE, len + 1,
+                                                   (uint8_t *)&data_out);
+            if (err3) {
+                LOG_ERR("ZMK NUM LAYERS send failed (err %d)", err);
+            }
         }
 #endif
     }
@@ -832,6 +890,30 @@ int keymap_listener(const zmk_event_t *eh) {
 
 ZMK_LISTENER(keymap, keymap_listener);
 ZMK_SUBSCRIPTION(keymap, zmk_position_state_changed);
+
+// static void zmk_num_layers_send_state(struct k_work *work) {
+//     uint8_t num_layers = ZMK_KEYMAP_LAYERS_LEN;
+
+//     LOG_DBG("Sending number of layers: %d", num_layers);
+//     // zmk_hid_indicators_t indicators = zmk_hid_indicators_get_current_profile();
+//     int err = zmk_split_central_send_data(DATA_TAG_NUM_LAYERS_STATE, sizeof(uint8_t),
+//                                           (uint8_t *)&num_layers);
+//     if (err) {
+//         LOG_ERR("ZMK NUM LAYERS send failed (err %d)", err);
+//     }
+// }
+
+// K_WORK_DEFINE(num_layers_send_state_work, zmk_num_layers_send_state);
+
+int peripheral_status_listener(const zmk_event_t *eh) {
+    if (as_zmk_split_peripheral_status_changed(eh)) {
+        k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &num_layers_send_state_work);
+    }
+    return 0;
+}
+
+ZMK_LISTENER(peripheral_status_listener, peripheral_status_listener);
+ZMK_SUBSCRIPTION(peripheral_status_listener, zmk_split_peripheral_status_changed);
 
 #if ZMK_KEYMAP_HAS_SENSORS
 ZMK_SUBSCRIPTION(keymap, zmk_sensor_event);

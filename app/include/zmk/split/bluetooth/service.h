@@ -14,15 +14,19 @@
 
 enum data_tag {
     // RGB state
-    DATA_TAG_RGB_STATE,
+    /* 0 */ DATA_TAG_RGB_STATE,
     // Backlight state
-    DATA_TAG_BACKLIGHT_STATE,
+    /* 1 */ DATA_TAG_BACKLIGHT_STATE,
     // HID indicators state
-    DATA_TAG_HID_INDICATORS_STATE,
+    /* 2 */ DATA_TAG_HID_INDICATORS_STATE,
     // Keymap state
-    DATA_TAG_KEYMAP_STATE,
-    // Start of custom tags
-    DATA_TAG_WPM_STATE,
+    /* 3 */ DATA_TAG_KEYMAP_STATE,
+    // WPM state
+    /* 4 */ DATA_TAG_WPM_STATE,
+    // Num Layers state,
+    /* 5 */ DATA_TAG_NUM_LAYERS_STATE,
+    // Layer name state,
+    /* 6 */ DATA_TAG_LAYER_NAME_STATE,
 };
 
 struct sensor_event {
